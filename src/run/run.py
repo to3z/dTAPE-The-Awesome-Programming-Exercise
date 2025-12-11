@@ -12,7 +12,7 @@ from os.path import dirname, abspath
 from learners import REGISTRY as le_REGISTRY
 from runners import REGISTRY as r_REGISTRY
 from controllers import REGISTRY as mac_REGISTRY
-from components.episode_buffer import ReplayBuffer
+from components.episode_buffer import ReplayBuffer, DualReplayBuffer, PrioritizedReplayBuffer
 from components.transforms import OneHot
 
 from smac.env import StarCraft2Env
@@ -103,6 +103,7 @@ def run_sequential(args, logger):
         "probs": {"vshape": (env_info["n_actions"],), "group": "agents", "dtype": th.float},
         "reward": {"vshape": (1,)},
         "terminated": {"vshape": (1,), "dtype": th.uint8},
+        "battle_won": {"vshape": (1,), "dtype": th.uint8},
     }
     groups = {
         "agents": args.n_agents
@@ -111,7 +112,12 @@ def run_sequential(args, logger):
         "actions": ("actions_onehot", [OneHot(out_dim=args.n_actions)])
     }
 
-    buffer = ReplayBuffer(scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,
+    buffer_type = {
+        "replay_buffer": ReplayBuffer,
+        "prioritized_replay_buffer": PrioritizedReplayBuffer,
+        "dual_replay_buffer": DualReplayBuffer
+    }[args.buffer_type if hasattr(args, 'buffer_type') else 'replay_buffer']
+    buffer = buffer_type(scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,
                           preprocess=preprocess,
                           device="cpu" if args.buffer_cpu_only else args.device)
     # Setup multiagent controller here
@@ -225,6 +231,8 @@ def run_sequential(args, logger):
 
         if (runner.t_env - last_log_T) >= args.log_interval:
             logger.log_stat("episode", episode, runner.t_env)
+            if isinstance(buffer, DualReplayBuffer):
+                logger.log_stat("win_rate", buffer.win_rate(), runner.t_env)
             logger.print_recent_stats()
             last_log_T = runner.t_env
 

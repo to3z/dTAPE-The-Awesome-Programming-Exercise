@@ -148,9 +148,11 @@ class ParallelRunner:
                 if not terminated[idx]:
                     data = parent_conn.recv()
                     # Remaining data for this current timestep
-                    post_transition_data["reward"].append((data["reward"],))
+                    reward, delta_enemy, delta_deaths, delta_ally = data["reward"]
 
-                    episode_returns[idx] += data["reward"]
+                    post_transition_data["reward"].append((reward,))
+
+                    episode_returns[idx] += reward
                     episode_lengths[idx] += 1
                     if not test_mode:
                         self.env_steps_this_run += 1

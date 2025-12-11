@@ -341,3 +341,97 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             self._it_sum[idx] = priority ** self.alpha
             self._it_min[idx] = priority ** self.alpha
             self.max_priority = max(self.max_priority, priority)
+
+
+class DualReplayBuffer(EpisodeBatch):
+    def __init__(self, scheme, groups, buffer_size, max_seq_length, preprocess=None, device="cpu"):
+        super(DualReplayBuffer, self).__init__(scheme, groups, buffer_size, max_seq_length, preprocess=preprocess, device=device)
+        # lose buffer index: 0 ~ α*n
+        # win buffer index: α*n ~ n-1
+        self.win_ratio = 0.5  # 默认胜负比例
+        self.win_threshold = 10.0  # 回报阈值，超过为胜利
+        self.nxt_lose_idx = 0
+        self.nxt_win_idx = buffer_size - 1
+        self.n_lose = 0
+        self.n_win = 0
+        self.buffer_size = buffer_size
+        self.lbound = int(self.win_ratio * buffer_size)  # 负样本个数的下限
+        self.rbound = buffer_size  # 负样本个数的上限
+
+    def insert_episode_batch(self, ep_batch):
+        # # 计算每个 episode 的总回报，根据是否大于阈值来划分胜负
+        # episode_returns = ep_batch["reward"].sum(dim=1) # (bs, 1)
+        # win_indices = (episode_returns > self.win_threshold).nonzero(as_tuple=True)[0].cpu().tolist()
+        # lose_indices = (episode_returns <= self.win_threshold).nonzero(as_tuple=True)[0].cpu().tolist()
+
+        # 根据 battle_won 字段划分胜负
+        battle_won = ep_batch["battle_won"].squeeze(-1)
+        win_indices = (battle_won == 1).nonzero(as_tuple=True)[0].cpu().tolist()
+        lose_indices = (battle_won == 0).nonzero(as_tuple=True)[0].cpu().tolist()
+        
+        if len(win_indices) > 0:
+            self.nxt_win_idx = self._ring_insert(ep_batch[win_indices],
+                    self.buffer_size - 1, self.lbound,
+                    self.nxt_win_idx)
+            self.n_win = min(self.n_win + len(win_indices), self.lbound)
+            self.rbound = max(self.lbound, self.buffer_size - self.n_win)
+            if self.nxt_lose_idx >= self.rbound:
+                # 胜样本的增加可能导致当前的负样本插入索引在边界之外，重置负样本插入索引
+                self.nxt_lose_idx = 0
+        if len(lose_indices) > 0:
+            self.nxt_lose_idx = self._ring_insert(ep_batch[lose_indices],
+                    0, self.rbound - 1,
+                    self.nxt_lose_idx)
+            self.n_lose = min(self.n_lose + len(lose_indices), self.rbound)
+
+    def can_sample(self, batch_size):
+        return self.n_win + self.n_lose >= batch_size
+
+    def sample(self, batch_size):
+        n_win_sample = min(self.n_win, batch_size // 2)
+        n_lose_sample = batch_size - n_win_sample
+        win_indices = list(range(self.buffer_size - self.n_win, self.buffer_size))
+        lose_indices = list(range(self.n_lose))
+        sampled_win_indices = random.sample(win_indices, n_win_sample)
+        sampled_lose_indices = random.sample(lose_indices, n_lose_sample)
+        return self[sampled_win_indices + sampled_lose_indices]
+
+    def _ring_insert(self, ep_batch, start_idx, end_idx, insert_idx):
+        """
+        在环形缓冲区中插入一个 episode batch
+        Args:
+            start_idx: 缓冲区起始索引 (包含)
+            end_idx: 缓冲区结束索引 (包含)
+            insert_idx: 下一个插入位置
+        Returns:
+            更新后的下一个插入位置
+        """
+        bs = ep_batch.batch_size
+        buffer_left = abs(end_idx - insert_idx) + 1
+        if bs <= buffer_left:
+            ascending = start_idx < end_idx
+            if not ascending:
+                start_idx, end_idx = end_idx, start_idx
+            buffer_slice = slice(insert_idx, insert_idx + bs) if ascending else \
+                           slice(insert_idx - bs + 1, insert_idx + 1)
+            self.update(ep_batch.data.transition_data,
+                        buffer_slice,
+                        slice(0, ep_batch.max_seq_length),
+                        mark_filled=False)
+            self.update(ep_batch.data.episode_data, buffer_slice)
+            insert_idx = insert_idx + bs if ascending else insert_idx - bs
+            if insert_idx > end_idx:  # ascending
+                insert_idx = start_idx
+            if insert_idx < start_idx:  # descending
+                insert_idx = end_idx
+        else:
+            insert_idx = self._ring_insert(ep_batch[0:buffer_left, :], start_idx, end_idx, insert_idx)
+            insert_idx = self._ring_insert(ep_batch[buffer_left:, :], start_idx, end_idx, insert_idx)
+        return insert_idx
+
+    def __repr__(self):
+        return f"DualReplayBuffer(Win: {self.win_buffer.episodes_in_buffer}, Lose: {self.lose_buffer.episodes_in_buffer})"
+    
+    def win_rate(self):
+        total = self.n_win + self.n_lose
+        return self.n_win / total if total > 0 else 0.0

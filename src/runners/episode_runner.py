@@ -80,6 +80,7 @@ class EpisodeRunner:
                 "actions": cpu_actions,
                 "reward": [(reward,)],
                 "terminated": [(terminated != env_info.get("episode_limit", False),)],
+                "battle_won": [(env_info.get("battle_won", False),)] # lsh 修改
             }
 
             self.batch.update(post_transition_data, ts=self.t)
