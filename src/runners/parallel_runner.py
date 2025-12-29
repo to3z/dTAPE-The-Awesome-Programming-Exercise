@@ -36,8 +36,10 @@ class ParallelRunner:
 
         self.t_env = 0
 
-        self.train_returns = []
-        self.test_returns = []
+        # self.train_returns = []
+        # self.test_returns = []
+        self.train_returns = {"reward": [], "delta_enemy": [], "delta_deaths": [], "delta_ally": []}
+        self.test_returns = {"reward": [], "delta_enemy": [], "delta_deaths": [], "delta_ally": []}
         self.train_stats = {}
         self.test_stats = {}
 
@@ -89,7 +91,8 @@ class ParallelRunner:
         self.reset()
 
         all_terminated = False
-        episode_returns = [0 for _ in range(self.batch_size)]
+        # episode_returns = [0 for _ in range(self.batch_size)]
+        episode_returns = [{"reward": 0, "delta_enemy": 0, "delta_deaths": 0, "delta_ally": 0} for _ in range(self.batch_size)]
         episode_lengths = [0 for _ in range(self.batch_size)]
         self.mac.init_hidden(batch_size=self.batch_size)
         terminated = [False for _ in range(self.batch_size)]
@@ -134,7 +137,8 @@ class ParallelRunner:
             # Post step data we will insert for the current timestep
             post_transition_data = {
                 "reward": [],
-                "terminated": []
+                "terminated": [],
+                "battle_won": []
             }
             # Data for the next step we will insert in order to select an action
             pre_transition_data = {
@@ -148,12 +152,29 @@ class ParallelRunner:
                 if not terminated[idx]:
                     data = parent_conn.recv()
                     # Remaining data for this current timestep
-                    reward, delta_enemy, delta_deaths, delta_ally = data["reward"]
+                    full_reward = data["reward"]
+                    reward, delta_enemy, delta_deaths, delta_ally, delta_lists = full_reward
 
-                    post_transition_data["reward"].append((reward,))
+                    if self.args.reward_decompose:
+                        if delta_lists is None:
+                            reward_dim = (self.args.n_agents + self.args.n_enemies) * 2 + 1
+                            reward_item = tuple([0] * reward_dim)
+                        else:
+                            delta_ally_list, delta_enemy_list, death_list = delta_lists
+                            terminate_reward = 1 if data["info"].get("battle_won", False) else 0
+                            reward_item = (*delta_ally_list, *delta_enemy_list, *death_list, terminate_reward)
+                    else:
+                        reward_item = (reward,)
 
-                    episode_returns[idx] += reward
+                    post_transition_data["reward"].append(reward_item)
+
+                    # [修改] 累加各项统计指标
+                    episode_returns[idx]["reward"] += reward
+                    episode_returns[idx]["delta_enemy"] += delta_enemy
+                    episode_returns[idx]["delta_deaths"] += delta_deaths
+                    episode_returns[idx]["delta_ally"] += delta_ally
                     episode_lengths[idx] += 1
+
                     if not test_mode:
                         self.env_steps_this_run += 1
 
@@ -164,6 +185,7 @@ class ParallelRunner:
                         env_terminated = True
                     terminated[idx] = data["terminated"]
                     post_transition_data["terminated"].append((env_terminated,))
+                    post_transition_data["battle_won"].append((data["info"].get("battle_won", False),))
 
                     # Data for the next timestep needed to select an action
                     pre_transition_data["state"].append(data["state"])
@@ -200,10 +222,13 @@ class ParallelRunner:
         cur_stats["n_episodes"] = self.batch_size + cur_stats.get("n_episodes", 0)
         cur_stats["ep_length"] = sum(episode_lengths) + cur_stats.get("ep_length", 0)
 
-        cur_returns.extend(episode_returns)
+        # cur_returns.extend(episode_returns)
+        for ep_ret in episode_returns:
+            for k, v in ep_ret.items():
+                cur_returns[k].append(v)
 
         n_test_runs = max(1, self.args.test_nepisode // self.batch_size) * self.batch_size
-        if test_mode and (len(self.test_returns) == n_test_runs):
+        if test_mode and (len(self.test_returns["reward"]) == n_test_runs):
             self._log(cur_returns, cur_stats, log_prefix)
         elif self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
             self._log(cur_returns, cur_stats, log_prefix)
@@ -214,9 +239,14 @@ class ParallelRunner:
         return self.batch
 
     def _log(self, returns, stats, prefix):
-        self.logger.log_stat(prefix + "return_mean", np.mean(returns), self.t_env)
-        self.logger.log_stat(prefix + "return_std", np.std(returns), self.t_env)
-        returns.clear()
+        self.logger.log_stat(prefix + "return_mean", np.mean(returns["reward"]), self.t_env)
+        self.logger.log_stat(prefix + "return_std", np.std(returns["reward"]), self.t_env)
+        self.logger.log_stat(prefix + "delta_enemy_mean", np.mean(returns["delta_enemy"]), self.t_env)
+        self.logger.log_stat(prefix + "delta_deaths_mean", np.mean(returns["delta_deaths"]), self.t_env)
+        self.logger.log_stat(prefix + "delta_ally_mean", np.mean(returns["delta_ally"]), self.t_env)
+
+        for k in returns:
+            returns[k].clear()
 
         for k, v in stats.items():
             if k != "n_episodes":
