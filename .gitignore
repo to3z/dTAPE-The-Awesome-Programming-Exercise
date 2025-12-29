@@ -2,3 +2,5 @@
 paper/
 results*/
 __pycache__/
+*.txt
+*.log
