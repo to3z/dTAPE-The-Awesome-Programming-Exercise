@@ -10,6 +10,7 @@ from .dmaq_qatten_learner import DMAQ_qattenLearner
 from .offpg_learner import OffPGLearner
 from .fmac_learner import FMACLearner
 from .max_qatten_learner import MaxQAttenLearner
+from .max_q_learner_lsh import MaxQLearner_LSH
 
 REGISTRY = {}
 
@@ -25,3 +26,4 @@ REGISTRY["dmaq_qatten_learner"] = DMAQ_qattenLearner
 REGISTRY["offpg_learner"] = OffPGLearner
 REGISTRY["fmac_learner"] = FMACLearner
 REGISTRY['max_qatten_learner'] = MaxQAttenLearner
+REGISTRY['max_q_learner_lsh'] = MaxQLearner_LSH

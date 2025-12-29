@@ -9,28 +9,29 @@ from modules.mixers.qmix_central_no_hyper import QMixerCentralFF
 from utils.rl_utils import build_td_lambda_targets
 import torch as th
 import numpy as np
+import math # lsh
 from torch.optim import RMSprop, Adam
 from collections import deque
 from controllers import REGISTRY as mac_REGISTRY
 import torch.distributions as D
-import torch.nn.functional as F
 from utils.th_utils import get_parameters_num
-import utils.th_utils as th_utils
-import smac.env.sc2_tactics.utils as sc2_tactics_utils
-from modules.ICM.ICM import ICM
 
-class MaxQAttenLearner:
+class MaxQLearner_LSH:
     def __init__(self, mac, scheme, logger, args):
         self.args = args
         self.mac = mac
         self.logger = logger
         self.n_agents = args.n_agents
         self.n_actions = args.n_actions
+        self.n_enemies = args.n_enemies # lsh modified, ensured key n_enemies exists
+        self.agent_feature_names = args.agent_feature_names # lsh modified
+        self.enemy_feature_names = args.enemy_feature_names # lsh modified
+        self.unit_dim_tuple = args.unit_dim_tuple # lsh modified
+
         self.mac_params = list(mac.parameters())
 
         self.last_target_update_episode = 0
         groups = None
-        assert args.comm and args.use_IB and args.comm_method == 'information_bottleneck_atten'
         self.critic_mac = mac_REGISTRY[args.critic_mac](scheme, groups, args)
         # mac_REGISTRY[args.central_mac]
         self.s_mu = th.zeros(1)
@@ -53,7 +54,10 @@ class MaxQAttenLearner:
                 raise ValueError("Mixer {} not recognised.".format(args.mixer))
             self.mixer_params = list(self.mixer.parameters())
             self.params += list(self.mixer.parameters())
-            # self.target_mixer = copy.deepcopy(self.mixer)
+            self.target_mixer = copy.deepcopy(self.mixer)
+
+        # a little wasteful to deepcopy (e.g. duplicates action selector), but should work for any MAC
+        self.target_mac = copy.deepcopy(mac)
 
         # Central Q
         self.central_mac = None
@@ -61,7 +65,7 @@ class MaxQAttenLearner:
             if self.args.central_loss == 0:
                 self.central_mixer = self.mixer
                 self.central_mac = self.mac
-                self.target_central_mac = None
+                self.target_central_mac = self.target_mac
             else:
                 if self.args.central_mixer == "ff":
                     self.central_mixer = QMixerCentralFF(args) # Feedforward network that takes state and agent utils as input
@@ -78,19 +82,6 @@ class MaxQAttenLearner:
             raise Exception("Error with qCentral")
         self.params += list(self.central_mixer.parameters())
         self.target_central_mixer = copy.deepcopy(self.central_mixer)
-
-        # self.icm = ICM(scheme, args)
-        # self.icm_optimizer = Adam(params=self.icm.parameters(), lr=args.lr)
-
-        if self.args.reward_decompose:
-            # reward_dim = delta_ally + delta_enemy + delta_deaths + terminate_reward
-            self._init_reward_weights(args)
-
-            self.construct_reward = lambda reward: th.bmm(
-                reward,  # (bs, t, reward_dim)
-                self.reward_weights.unsqueeze(0).expand(reward.shape[0], -1, -1)  # (bs, reward_dim, 1)
-            )  # return: (bs, t, 1)
-            self.reward_weights_optimizer = Adam(params=[self.reward_weights], lr=1e-4)
 
         print('Mixer Size: ')
         print(get_parameters_num(list(self.mixer.parameters()) + list(self.central_mixer.parameters())))
@@ -112,22 +103,20 @@ class MaxQAttenLearner:
         mask = batch["filled"][:, :-1].float()
         mask[:, 1:] = mask[:, 1:] * (1 - terminated[:, :-1])
         avail_actions = batch["avail_actions"]
-        
-        if self.args.reward_decompose:
-            rewards = self.construct_reward(rewards)  # (bs, t, 1)
 
-        if self.args.multi_reward:
-            rewards[0] = rewards[0] * (1 - self.alpha) + (rewards[1] + rewards[2] - rewards[3]) * self.alpha
-            # alpha 逐渐减小，训练初期，使用 delta_enemy + delta_ally - delta_deaths 来引导训练，后期逐渐过渡到只使用 terminate_reward
+        ### More information, lsh modified
+        states = batch["state"] # used by 'A'
+
+
+
+
 
         critic_mac_out = []
         mu_out = []
         sigma_out = []
         logits_out = []
         m_sample_out = []
-        atten_score_out = []
         actions_logprobs = []
-        critic_pred_actions = []
         # Calculate estimated Q-Values
         mac_out = []
         self.mac.init_hidden(batch.batch_size)
@@ -135,7 +124,7 @@ class MaxQAttenLearner:
         for t in range(batch.max_seq_length):
             agent_outs = self.mac.forward(batch, t=t)
             mac_out.append(agent_outs)
-        mac_out = th.stack(mac_out, dim=1)  # (bs, t+1, n_agents, n_actions)
+        mac_out = th.stack(mac_out, dim=1)  # Concat over time
 
         z = mac_out == 0.0
         z = z.float() * 1e-8
@@ -143,41 +132,48 @@ class MaxQAttenLearner:
 
         self.critic_mac.init_hidden(batch.batch_size)
         for t in range(batch.max_seq_length):
-            critic_agent_outs, (mu, sigma), logits, m_sample, atten_score, pred_actions = self.critic_mac.forward(batch, t=t)
-            atten_score_out.append(atten_score)
-            mu_out.append(mu)
-            sigma_out.append(sigma)
-            logits_out.append(logits)
-            m_sample_out.append(m_sample)
+            if self.args.comm and self.args.use_IB:
+                critic_agent_outs, (mu, sigma), logits, m_sample = self.critic_mac.forward(batch, t=t)
+                mu_out.append(mu)
+                sigma_out.append(sigma)
+                logits_out.append(logits)
+                m_sample_out.append(m_sample)
+            else:
+                critic_agent_outs = self.critic_mac.forward(batch, t=t)
             critic_mac_out.append(critic_agent_outs)
-            critic_pred_actions.append(pred_actions)
-        critic_mac_out = th.stack(critic_mac_out, dim=1)  # (bs, t+1, n_agents, n_actions)
-        mu_out = th.stack(mu_out, dim=1)[:, :-1]  # (bs, t, n_agents, comm_embed_dim*n_agents)
-        sigma_out = th.stack(sigma_out, dim=1)[:, :-1]
-        logits_out = th.stack(logits_out, dim=1)[:, :-1]  # (bs, t, n_agents, n_actions)
-        m_sample_out = th.stack(m_sample_out, dim=1)[:, :-1]
-        atten_score_out = th.stack(atten_score_out, dim=1)  # (bs, t+1, receiver, sender)
+        critic_mac_out = th.stack(critic_mac_out, dim=1)  # Concat over time
+        if self.args.use_IB:
+            mu_out = th.stack(mu_out, dim=1)[:, :-1]  # Concat over time
+            sigma_out = th.stack(sigma_out, dim=1)[:, :-1]  # Concat over time
+            logits_out = th.stack(logits_out, dim=1)[:, :-1]
+            m_sample_out = th.stack(m_sample_out, dim=1)[:, :-1]
 
-        if self.args.mispred_rewards:
-            critic_pred_actions = th.stack(critic_pred_actions, dim=1)  # (bs, t+1, predicted, predictor, n_actions)
-            action_pred_loss = F.kl_div(
-                critic_pred_actions,  # (bs, t+1, predicted, predictor, n_actions)
-                mac_out.detach().unsqueeze(3).repeat(1, 1, 1, self.n_agents, 1),  # (bs, t+1, actual, [repeated], n_actions)
-                reduction='none'
-            ).sum(dim=-1)  # (bs, t+1, predicted, predictor)
-            # 在 mispred_rewards 中，对于同一小组 (atten_score 大), 鼓励预测正确；对于不同小组 (atten_score 小)，鼓励预测错误 (表明存在探索)
-            mispred_rewards = - (atten_score_out.detach() * action_pred_loss.detach()).sum(dim=3)  # (bs, t+1, predicted)
-            mispred_rewards = th.sigmoid(mispred_rewards) * 0.1  # 缩放到 (0, 0.1)
+
 
         # Pick the Q-Values for the actions taken by each agent
-        chosen_action_qvals_agents = th.gather(critic_mac_out[:, :-1], dim=3, index=actions).squeeze(3)  # (bs, t, reward_dim, n_agents)
+        chosen_action_qvals_agents = th.gather(critic_mac_out[:, :-1], dim=3, index=actions).squeeze(3)  # Remove the last dim
+        chosen_action_qvals = chosen_action_qvals_agents
+
+        # Calculate the Q-Values necessary for the target
+        target_mac_out = []
+        self.target_mac.init_hidden(batch.batch_size)
+        for t in range(batch.max_seq_length):
+            target_agent_outs = self.target_mac.forward(batch, t=t)
+            target_mac_out.append(target_agent_outs)
+        label_target_max_out = th.stack(target_mac_out[:-1], dim=1) 
+        # We don't need the first timesteps Q-Value estimate for calculating targets
+        target_mac_out = th.stack(target_mac_out[:], dim=1)  # Concat across time
+
+        # Mask out unavailable actions
+        target_mac_out[avail_actions[:, :] == 0] = -9999999  # From OG deepmarl
 
         # Max over target Q-Values
         if self.args.double_q:
             # Get actions that maximise live Q (for double q-learning)
             mac_out_detach = mac_out.clone().detach()
             mac_out_detach[avail_actions == 0] = -9999999
-            cur_max_action_targets, cur_max_actions = mac_out_detach[:, :].max(dim=3, keepdim=True)  # (bs, t+1, n_agents, 1)
+            cur_max_action_targets, cur_max_actions = mac_out_detach[:, :].max(dim=3, keepdim=True)
+            target_max_agent_qvals = th.gather(target_mac_out[:,:], 3, cur_max_actions[:,:]).squeeze(3)
         else:
             raise Exception("Use double q")
 
@@ -188,34 +184,31 @@ class MaxQAttenLearner:
         for t in range(batch.max_seq_length):
             agent_outs = self.central_mac.forward(batch, t=t)
             central_mac_out.append(agent_outs)
-        central_mac_out = th.stack(central_mac_out, dim=1)  # (bs, t+1, n_agents, n_actions, central_action_embed)
-        central_chosen_action_qvals_agents = th.gather(central_mac_out[:, :-1], dim=3, index=actions.unsqueeze(4).repeat(1,1,1,1,self.args.central_action_embed)).squeeze(3)  # (bs, t, n_agents, central_action_embed)
+        central_mac_out = th.stack(central_mac_out, dim=1)  # Concat over time
+        central_chosen_action_qvals_agents = th.gather(central_mac_out[:, :-1], dim=3, index=actions.unsqueeze(4).repeat(1,1,1,1,self.args.central_action_embed)).squeeze(3)  # Remove the last dim
 
         central_target_mac_out = []
         self.target_central_mac.init_hidden(batch.batch_size)
         for t in range(batch.max_seq_length):
             target_agent_outs = self.target_central_mac.forward(batch, t=t)
             central_target_mac_out.append(target_agent_outs)
-        central_target_mac_out = th.stack(central_target_mac_out, dim=1)  # (bs, t+1, n_agents, n_actions, central_action_embed)
+        central_target_mac_out = th.stack(central_target_mac_out[:], dim=1)  # Concat across time
         # Mask out unavailable actions
         central_target_mac_out[avail_actions[:, :] == 0] = -9999999  # From OG deepmarl
         # Use the Qmix max actions
-        central_target_max_agent_qvals = th.gather(central_target_mac_out[:,:], 3, cur_max_actions[:,:].unsqueeze(4).repeat(1,1,1,1,self.args.central_action_embed)).squeeze(3)  # (bs, t+1, n_agents, central_action_embed)
+        central_target_max_agent_qvals = th.gather(central_target_mac_out[:,:], 3, cur_max_actions[:,:].unsqueeze(4).repeat(1,1,1,1,self.args.central_action_embed)).squeeze(3)
 
-        # # 计算 intrinsic reward
-        # intrinsic_rewards, icm_forward_loss, icm_inverse_loss = self.icm.forward(batch)
-        # intrinsic_rewards = intrinsic_rewards.mean(dim=2)  # (bs, t, n_agents) -> (bs, t)
 
         # Mix
-        chosen_action_qvals = self.mixer(chosen_action_qvals_agents, batch["state"][:, :-1])  # (bs, t, 1)
-        target_max_qvals = self.target_central_mixer(central_target_max_agent_qvals, batch["state"])  # (bs, t+1, reward_dim)
+        chosen_action_qvals = self.mixer(chosen_action_qvals, batch["state"][:, :-1])
+        target_max_qvals = self.target_central_mixer(central_target_max_agent_qvals, batch["state"])
 
         # We use the calculation function of sarsa lambda to approximate q star lambda
         targets = build_td_lambda_targets(rewards, terminated, mask, target_max_qvals,
-                                    self.args.n_agents, self.args.gamma, self.args.td_lambda)  # (bs, t, reward_dim)
+                                    self.args.n_agents, self.args.gamma, self.args.td_lambda)
 
         # Td-error
-        td_error = (chosen_action_qvals - (targets[:,:,[0]].detach()))
+        td_error = (chosen_action_qvals - (targets.detach()))
 
         mask = mask.expand_as(td_error)
 
@@ -223,39 +216,61 @@ class MaxQAttenLearner:
         masked_td_error = td_error * mask
 
         # ActorLoss
-        q_i_mean_negi_mean = th.sum(mac_out * (self.alpha * actions_logprobs - critic_mac_out), dim=-1)  # (bs, t+1, n_agents)
+        q_i_mean_negi_mean = th.sum(mac_out * (self.alpha * actions_logprobs - critic_mac_out), dim=-1)  # (1,60,3) # TODO
         
-        if self.args.mispred_rewards:
-            q_i_mean_negi_mean -= mispred_rewards
-        
-        q_i_mean_negi_mean=q_i_mean_negi_mean.view(q_i_mean_negi_mean.shape[0], q_i_mean_negi_mean.shape[1], 1, self.n_agents).repeat(1,1,self.n_agents,1)
-        
-        # atten_score_out: (bs, t+1, receiver, sender)
-        q_i_mean_negi_mean *= atten_score_out.sigmoid()
+        q_i_mean_negi_mean=q_i_mean_negi_mean.view(q_i_mean_negi_mean.shape[0],q_i_mean_negi_mean.shape[1],1,self.n_agents).repeat(1,1,self.n_agents,1)
+        # --- Original fomulation of 'A' ---
+        # A=th.FloatTensor([[1 if np.random.uniform()<self.args.p else 0 for _ in range(self.n_agents)]for _ in range(self.n_agents)])
+        # for i in range(self.n_agents):
+        #     A[i,i]=1.0
+        # dropout=A.reshape(1,1,A.shape[0],-1).repeat(q_i_mean_negi_mean.shape[0],q_i_mean_negi_mean.shape[1],1,1).cuda()
 
-        atten_score_out = atten_score_out.reshape(-1, self.n_agents, self.n_agents).sigmoid()
-        # 用以下 loss 来约束 attention score
-        # 传递性 loss
-        atten_transitivity_loss = th_utils.transitivity_loss(atten_score_out)
-        # 二值化 loss
-        atten_binarization_loss = th_utils.binarization_loss(atten_score_out)
-        # 对称性 loss
-        atten_symmetry_loss = th_utils.symmetry_loss(atten_score_out)
-        # # 出度限制
-        # atten_degree_constraint_loss = th_utils.degree_constraint_loss(atten_score_out, self.args.min_atten_degree, self.args.max_atten_degree)
-        # 方差限制
-        atten_degree_constraint_loss = - atten_score_out.reshape(-1, self.n_agents * self.n_agents).var(dim=1).mean()  # 
-        atten_loss = self.args.atten_transitivity_beta * atten_transitivity_loss + \
-                     self.args.atten_binarization_beta * atten_binarization_loss + \
-                     self.args.atten_symmetry_beta * atten_symmetry_loss + \
-                     self.args.atten_degree_constraint_beta * atten_degree_constraint_loss
+        # New fomulation of 'A', lsh modified
+        n_agents=self.n_agents 
+        n_basic_bits,n_shield_bit,n_type_bits=self.unit_dim_tuple
+        n_unit_dim= sum(self.unit_dim_tuple)
+        agent_feats_flat=states[:,:,:n_agents*n_unit_dim]
+        agent_feats=agent_feats_flat.view(
+            states.shape[0], # bs
+            states.shape[1], # seq len
+            n_agents,     # n_agents
+            n_unit_dim    # unit dim
+        )
+
+        agent_basic_info = agent_feats[:,:,:,:n_basic_bits]
+        agent_coords = agent_basic_info[:, :, :, 2:4]
+        # coords_i: (bs, sl, n_agents, 1, 2)
+        # coords_j: (bs, sl, 1, n_agents, 2)
+        coords_i = agent_coords.unsqueeze(3)
+        coords_j = agent_coords.unsqueeze(2)
+
+        # dist_matrix shape: (bs, sl, n_agents, n_agents)
+        dist_matrix = th.norm(coords_i - coords_j, dim=-1)
+        K = math.ceil(0.4 * self.n_agents)
+        # indices shape: (bs, sl, n_agents, K)
+        _, indices = th.topk(-dist_matrix, k=K, dim=-1)
+        A_knn = th.zeros_like(dist_matrix)
+        src = th.ones_like(indices, dtype=th.float)
+        # scatter_(dim, index, src)
+        A_knn.scatter_(-1, indices, src)
+
+        agent_types = agent_feats[:, :, :, -n_type_bits:]  # (bs, seq len, n_agents, type bits)
+        agent_types_i = agent_types.unsqueeze(3)
+        agent_types_j = agent_types.unsqueeze(2)
+        A = th.all(agent_types_i == agent_types_j, dim=-1).float()
+        
+        A *= A_knn
+        dropout = A.cuda()
+
+        
+        q_i_mean_negi_mean*=dropout
         
         Q_i_mean_negi_mean = self.mixer(q_i_mean_negi_mean.view(-1, self.n_agents, 1), batch["state"],dropout=True).view(q_i_mean_negi_mean.shape[0],q_i_mean_negi_mean.shape[1],self.n_agents)[:,:-1]
         policy_loss = (Q_i_mean_negi_mean * mask.repeat(1,1,self.n_agents)).sum() / mask.repeat(1,1,self.n_agents).sum()
 
         target_entropy = -1. * self.args.n_actions
         # Training central Q
-        central_chosen_action_qvals = self.central_mixer(central_chosen_action_qvals_agents, batch["state"][:, :-1])  # (bs, t, reward_dim)
+        central_chosen_action_qvals = self.central_mixer(central_chosen_action_qvals_agents, batch["state"][:, :-1])
         central_td_error = (central_chosen_action_qvals - targets.detach())
         central_mask = mask.expand_as(central_td_error)
         central_masked_td_error = central_td_error * central_mask
@@ -278,15 +293,15 @@ class MaxQAttenLearner:
         #
         # target_max_qvals_c = copy.copy(target_max_qvals)
         cur_max_actions_cg = cur_max_actions.clone().detach()
-        target_max_qvals_cMax = target_max_qvals[:,:,[0]].clone().detach()  # (bs, t+1, 1) 只取第一维 reward
+        target_max_qvals_cMax = target_max_qvals.clone().detach()
         cur_max_actions_cGlobalMax = cur_max_actions.clone().detach()
         with th.no_grad():
             for agentn in range(self.args.n_agents):
                 cur_max_actions_c = cur_max_actions_cg.clone()
                 for actionn in range(self.args.n_actions):
                     cur_max_actions_c[:,:,agentn].mul_(0).add_(actionn)
-                    central_target_max_agent_qvals_c = th.gather(central_target_mac_out[:,:], 3, cur_max_actions_c[:,:].unsqueeze(4).repeat(1,1,1,1,self.args.central_action_embed)).squeeze(3)  # (bs, t+1, n_agents, central_action_embed)
-                    target_max_qvals_c = self.target_central_mixer(central_target_max_agent_qvals_c, batch["state"])[:,:,[0]]  # (bs, t+1, 1) 只取第一维 reward
+                    central_target_max_agent_qvals_c = th.gather(central_target_mac_out[:,:], 3, cur_max_actions_c[:,:].unsqueeze(4).repeat(1,1,1,1,self.args.central_action_embed)).squeeze(3)
+                    target_max_qvals_c = self.target_central_mixer(central_target_max_agent_qvals_c, batch["state"])
                     condition = (target_max_qvals_c > target_max_qvals_cMax)
                     target_max_qvals_cMax = th.where(condition, target_max_qvals_c, target_max_qvals_cMax)
                     cur_max_actions_cGlobalMax = th.where(condition.repeat(1,1,self.args.n_agents).unsqueeze(-1), cur_max_actions_c, cur_max_actions_cGlobalMax)
@@ -309,11 +324,7 @@ class MaxQAttenLearner:
         policy_loss.backward(retain_graph=True)
         self.policy_optimiser.step()
 
-        loss =  self.args.qmix_loss * qmix_loss + self.args.central_loss * central_loss + comm_loss + atten_loss
-
-        if self.args.mispred_rewards:
-            action_pred_loss = action_pred_loss.mean() * self.args.action_pred_beta
-            loss += action_pred_loss
+        loss =  self.args.qmix_loss * qmix_loss + self.args.central_loss * central_loss + comm_loss
 
 
 
@@ -344,34 +355,6 @@ class MaxQAttenLearner:
 
         self.alpha = self.alpha_optimizer.param_groups[0]['params'][0].exp()
 
-        # self.icm_optimizer.zero_grad()
-        # icm_loss = icm_forward_loss + icm_inverse_loss
-        # icm_loss.backward()
-        # self.icm_optimizer.step()
-
-        if self.args.reward_decompose:
-            # 更新 reward weights
-            battle_won, _ = batch["battle_won"].squeeze(-1).max(dim=1)  # (bs,)
-            n_win = battle_won.sum().item()
-            n_lose = battle_won.shape[0] - n_win
-            if n_win != 0 and n_lose != 0:
-                # 若没有获胜/失败的回合，则不更新 reward weights
-                gamma_array = th.pow(th.tensor(self.args.gamma), th.arange(rewards.shape[1], device=rewards.device))  # (t,)
-                gamma_rewards = th.mm(rewards.squeeze(-1), gamma_array.unsqueeze(1))  # (bs, t) @ (t, 1) -> (bs, 1)
-                mean_reward_won = gamma_rewards[battle_won == 1].mean()
-                mean_reward_lost = gamma_rewards[battle_won == 0].mean()
-                mean_reward = gamma_rewards.mean().item()
-                # 最大化 mean_reward_won - mean_reward_lost
-                reward_weight_loss = - (mean_reward_won - mean_reward_lost)
-                self.reward_weights_optimizer.zero_grad()
-                reward_weight_loss.backward()
-                self.reward_weights_optimizer.step()
-                mean_reward_updated = gamma_rewards.mean().item()
-                reward_scale_factor = mean_reward / (mean_reward_updated + 1e-8)
-                # 保持 reward scale 不变
-                with th.no_grad():
-                    self.reward_weights.mul_(reward_scale_factor)
-
         if t_env < 2000000:
             self.alpha = th.clamp(self.alpha, max = 0.999)
 
@@ -389,28 +372,21 @@ class MaxQAttenLearner:
             self.logger.log_stat("central_loss", central_loss.item(), t_env)
             self.logger.log_stat("grad_norm", grad_norm, t_env)
             self.logger.log_stat("mixer_norm", mixer_norm, t_env)
-            self.logger.log_stat("atten_transitivity_loss", atten_transitivity_loss.item(), t_env)
-            self.logger.log_stat("atten_binarization_loss", atten_binarization_loss.item(), t_env)
-            self.logger.log_stat("atten_symmetry_loss", atten_symmetry_loss.item(), t_env)
-            self.logger.log_stat("atten_degree_constraint_loss", atten_degree_constraint_loss.item(), t_env)
 
             mask_elems = mask.sum().item()
             self.logger.log_stat("td_error_abs", (masked_td_error.abs().sum().item()/mask_elems), t_env)
             self.logger.log_stat("q_taken_mean", (chosen_action_qvals * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
             self.logger.log_stat("alpha", self.alpha.item(), t_env)
             self.logger.log_stat("alpha_loss", alpha_loss.item(), t_env)
-            # self.logger.log_stat("icm_loss", icm_loss.item(), t_env)
-            if self.args.mispred_rewards:
-                self.logger.log_stat("action_pred_loss", action_pred_loss.item(), t_env)
-                self.logger.log_stat("mispred_reward", (mispred_rewards[:, :-1] * mask).sum().item()/(mask_elems), t_env)
             self.logger.log_stat("target_mean", (targets * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
             self.logger.log_stat("w_to_use", w_to_use, t_env)
             self.log_stats_t = t_env
         th.cuda.empty_cache()
 
     def _update_targets(self):
-        # if self.mixer is not None:
-        #     self.target_mixer.load_state_dict(self.mixer.state_dict())
+        self.target_mac.load_state(self.mac)
+        if self.mixer is not None:
+            self.target_mixer.load_state_dict(self.mixer.state_dict())
         if self.central_mac is not None:
             self.target_central_mac.load_state(self.central_mac)
         self.target_central_mixer.load_state_dict(self.central_mixer.state_dict())
@@ -418,15 +394,15 @@ class MaxQAttenLearner:
 
     def cuda(self):
         self.mac.cuda()
+        self.target_mac.cuda()
         if self.mixer is not None:
             self.mixer.cuda()
-            # self.target_mixer.cuda()
+            self.target_mixer.cuda()
         if self.central_mac is not None:
             self.central_mac.cuda()
             self.target_central_mac.cuda()
         self.central_mixer.cuda()
         self.target_central_mixer.cuda()
-        # self.icm.cuda()
         self.s_mu = self.s_mu.cuda()
         self.s_sigma = self.s_sigma.cuda()
         self.critic_mac.cuda()
@@ -438,29 +414,11 @@ class MaxQAttenLearner:
         if self.mixer is not None:
             th.save(self.mixer.state_dict(), "{}/mixer.th".format(path))
         th.save(self.optimiser.state_dict(), "{}/opt.th".format(path))
-        # th.save(self.icm_optimizer.state_dict(), "{}/icm.th".format(path))
 
     def load_models(self, path):
         self.mac.load_models(path)
+        # Not quite right but I don't want to save target networks
+        self.target_mac.load_models(path)
         if self.mixer is not None:
             self.mixer.load_state_dict(th.load("{}/mixer.th".format(path), map_location=lambda storage, loc: storage))
         self.optimiser.load_state_dict(th.load("{}/opt.th".format(path), map_location=lambda storage, loc: storage))
-        # self.icm_optimizer.load_state_dict(th.load("{}/icm.th".format(path), map_location=lambda storage, loc: storage))
-    
-    def _init_reward_weights(self, args):
-        self.reward_dim = (args.n_agents + args.n_enemies) * 2 + 1
-        self.default_weights = th.ones((self.reward_dim, 1), device=args.device, requires_grad=True)
-        with th.no_grad():
-            reward_negative_scale = args.env_args.get("reward_negative_scale", 1.0)
-            reward_death_value = args.env_args.get("reward_death_value", 1.0)
-            reward_win = args.env_args.get("reward_win", 1.0)
-            reward_lose = args.env_args.get("reward_defeat", 0)
-            reward_scale_rate = args.env_args.get("reward_scale_rate", 1.0)
-            self.default_weights[:args.n_agents] *= -reward_negative_scale  # delta ally
-            # delta enemy: *= 1
-            self.default_weights[args.n_agents + args.n_enemies : args.n_agents + args.n_enemies + args.n_agents] *= -reward_negative_scale * reward_death_value  # ally deaths
-            self.default_weights[args.n_agents + args.n_enemies + args.n_agents : -1] *= reward_death_value  # enemy deaths
-            self.default_weights[-1] *= reward_win - reward_lose  # terminate reward
-            max_reward = sc2_tactics_utils.common_utils.calculate_max_reward(args.n_enemies, reward_death_value, reward_win)
-            self.default_weights /= max_reward / reward_scale_rate
-        self.reward_weights = th.nn.Parameter(self.default_weights.clone().detach())

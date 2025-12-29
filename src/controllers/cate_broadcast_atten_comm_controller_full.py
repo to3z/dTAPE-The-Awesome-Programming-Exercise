@@ -278,16 +278,19 @@ class CateBAttenCommFMAC:
 		# 从 N(mu, sigma) 中采样 message
 		message = D.Normal(mu, sigma).rsample()  # (bs, receiver, sender, comm_embed_dim)
 
-		# agent 分别预测其他 agent 的动作分布
-		pred_actions = self.comm.action_predictor(comm_input.detach()).reshape(bs, self.n_agents, self.n_agents, -1)  # (bs, predicted, predictor, n_actions)
+		if self.args.mispred_rewards:
+			# agent 分别预测其他 agent 的动作分布
+			pred_actions = self.comm.action_predictor(comm_input.detach()).reshape(bs, self.n_agents, self.n_agents, -1)  # (bs, predicted, predictor, n_actions)
+		else:
+			pred_actions = None
 
 		# 计算 attention score (query 和 key 的 cosine similarity)
-		q_norm = F.normalize(q, p=2, dim=-1)
-		k_norm = F.normalize(k, p=2, dim=-1)
+		# q_norm = F.normalize(q, p=2, dim=-1)
+		# k_norm = F.normalize(k, p=2, dim=-1)
 		atten_score = th.bmm(
-			q_norm.view(bs, self.n_agents, -1),
-			k_norm.view(bs, self.n_agents, -1).transpose(1, 2))
-		# atten_score: (bs, receiver, sender), [-1, 1]
+			q.view(bs, self.n_agents, -1),
+			k.view(bs, self.n_agents, -1).transpose(1, 2))
+		# atten_score: (bs, receiver, sender)
 
 		return (mu, sigma), message, atten_score, pred_actions
 

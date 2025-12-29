@@ -365,7 +365,7 @@ class DualReplayBuffer(EpisodeBatch):
         # lose_indices = (episode_returns <= self.win_threshold).nonzero(as_tuple=True)[0].cpu().tolist()
 
         # 根据 battle_won 字段划分胜负
-        battle_won = ep_batch["battle_won"].squeeze(-1)
+        battle_won, _ = ep_batch["battle_won"].squeeze(-1).max(dim=1)  # (bs,)
         win_indices = (battle_won == 1).nonzero(as_tuple=True)[0].cpu().tolist()
         lose_indices = (battle_won == 0).nonzero(as_tuple=True)[0].cpu().tolist()
         

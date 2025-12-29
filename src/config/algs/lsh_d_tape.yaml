@@ -8,30 +8,16 @@ epsilon_anneal_time: 100000 #100000
 runner: "episode"
 batch_size_run: 1
 buffer_size: 5000
-buffer_type: "dual_replay_buffer"
 
 batch_size: 128
 
-critic_mac: "cate_broadcast_atten_comm_mac_full"
+critic_mac: "cate_broadcast_comm_mac_full"
 critic_agent: "rnn_agent_n"
 
 # Comm
 comm: True
 comm_embed_dim: 3
-comm_method: "information_bottleneck_atten"
-
-# Attention
-atten_dim: 16
-atten_bias: 0
-atten_scale: 3.0
-min_atten_degree: 1
-max_atten_degree: 5
-atten_transitivity_beta: 0.1
-atten_binarization_beta: 0.1
-atten_symmetry_beta: 0.05
-atten_degree_constraint_beta: 0.05
-action_pred_beta: 0.1
-
+comm_method: "information_bottleneck_full"
 c_beta: 1.
 comm_beta: 0.001
 comm_entropy_beta: 1e-6
@@ -68,7 +54,7 @@ t_max: 2005000
 mac : "basic_mac_logits"
 agent: "rnn" # Default rnn agent
 agent_output_type: "q"
-learner: "max_qatten_learner"
+learner: "max_q_learner_lsh"
 double_q: True
 mixer: "qmix"
 mixing_embed_dim: 32
@@ -81,7 +67,7 @@ w: 0.5 #0.1 # $\alpha$ in the paper
 hysteretic_qmix: True # False -> CW-QMIX, True -> OW-QMIX
 
 central_mixing_embed_dim: 256
-central_action_embed: 8
+central_action_embed: 1
 central_mac: "basic_central_mac"
 central_agent: "central_rnn"
 central_rnn_hidden_dim: 64
@@ -98,8 +84,3 @@ alpha_init: -0.07
 
 p: 0.5
 name: "ow_qmix_env=4_adam_td_lambda"
-
-local_results_path: "results_atten" # Path for local results
-
-mispred_rewards: True
-reward_decompose: False
