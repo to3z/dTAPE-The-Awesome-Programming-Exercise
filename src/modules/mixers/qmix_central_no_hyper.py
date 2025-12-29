@@ -12,6 +12,7 @@ class QMixerCentralFF(nn.Module):
 
         self.n_agents = args.n_agents
         self.state_dim = int(np.prod(args.state_shape))
+        self.reward_dim = args.reward_dim
 
         self.input_dim = self.n_agents * self.args.central_action_embed + self.state_dim
         self.embed_dim = args.central_mixing_embed_dim
@@ -24,12 +25,12 @@ class QMixerCentralFF(nn.Module):
                                  non_lin(),
                                  nn.Linear(self.embed_dim, self.embed_dim),
                                  non_lin(),
-                                 nn.Linear(self.embed_dim, 1))
+                                 nn.Linear(self.embed_dim, self.reward_dim))
 
         # V(s) instead of a bias for the last layers
         self.V = nn.Sequential(nn.Linear(self.state_dim, self.embed_dim),
                                non_lin(),
-                               nn.Linear(self.embed_dim, 1))
+                               nn.Linear(self.embed_dim, self.reward_dim))
 
     def forward(self, agent_qs, states):
         bs = agent_qs.size(0)
@@ -43,5 +44,5 @@ class QMixerCentralFF(nn.Module):
 
         y = advs + vs
 
-        q_tot = y.view(bs, -1, 1)
+        q_tot = y.view(bs, -1, self.reward_dim)
         return q_tot

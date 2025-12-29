@@ -29,6 +29,7 @@ def run(_run, _config, _log):
 
     args = SN(**_config)
     args.device = "cuda" if args.use_cuda else "cpu"
+    args.multi_reward = getattr(args, 'multi_reward', False)  # lhc
 
     # setup loggers
     logger = Logger(_log)
@@ -87,9 +88,17 @@ def run_sequential(args, logger):
     # Set up schemes and groups here
     env_info = runner.get_env_info()
     args.n_agents = env_info["n_agents"]
+    args.n_enemies = env_info["n_enemies"] # lsh modified, ensured key "n_enemies" exists
+    args.agent_feature_names = env_info["agent_features"] # lsh modified
+    args.enemy_feature_names = env_info["enemy_features"] # lsh modified
+    args.unit_dim_tuple = env_info["unit_dim"] # lsh modified
+    args.reward_dim = (args.n_agents + args.n_enemies) * 2 + 1 if getattr(args, 'reward_decompose', False) else 1  # lhc
+    args.mispred_rewards = getattr(args, 'mispred_rewards', False)  # lhc
+
     args.n_actions = env_info["n_actions"]
     args.state_shape = env_info["state_shape"]
     args.accumulated_episodes = getattr(args, "accumulated_episodes", None)
+    args.reward_decompose = getattr(args, "reward_decompose", False)  # lhc
 
     if getattr(args, 'agent_own_state_size', False):
         args.agent_own_state_size = get_agent_own_state_size(args.env_args)
@@ -101,12 +110,13 @@ def run_sequential(args, logger):
         "actions": {"vshape": (1,), "group": "agents", "dtype": th.long},
         "avail_actions": {"vshape": (env_info["n_actions"],), "group": "agents", "dtype": th.int},
         "probs": {"vshape": (env_info["n_actions"],), "group": "agents", "dtype": th.float},
-        "reward": {"vshape": (1,)},
+        "reward": {"vshape": (args.reward_dim,)},  # lhc
         "terminated": {"vshape": (1,), "dtype": th.uint8},
-        "battle_won": {"vshape": (1,), "dtype": th.uint8},
+        "battle_won": {"vshape": (1,), "dtype": th.uint8}, # lhc modified
     }
     groups = {
-        "agents": args.n_agents
+        "agents": args.n_agents,
+        "enemies": args.n_enemies  # lsh modified, don't know what use
     }
     preprocess = {
         "actions": ("actions_onehot", [OneHot(out_dim=args.n_actions)])

@@ -68,17 +68,31 @@ class EpisodeRunner:
             # Fix memory leak
             cpu_actions = actions.to("cpu").numpy()
 
-            reward, terminated, env_info = self.env.step(actions[0])
+            full_reward, terminated, env_info = self.env.step(actions[0])
 
-            reward, delta_enemy, delta_deaths, delta_ally = reward
+            reward, delta_enemy, delta_deaths, delta_ally, delta_lists = full_reward
+
             episode_return["reward"] += reward
             episode_return["delta_enemy"] += delta_enemy
             episode_return["delta_deaths"] += delta_deaths
             episode_return["delta_ally"] += delta_ally
 
+            if self.args.reward_decompose:
+                if delta_lists is None:
+                    reward_dim = (self.args.n_agents + self.args.n_enemies) * 2 + 1
+                    reward_item = tuple([0] * reward_dim)
+                else:
+                    delta_ally_list, delta_enemy_list, death_list = delta_lists
+                    terminate_reward = 1 if env_info.get("battle_won", False) else 0
+                    reward_item = (*delta_ally_list, *delta_enemy_list, *death_list, terminate_reward)
+            else:
+                reward_item = (reward,)
+
+            # damage_per_enemy = env_info.get("damage_per_enemy", None)  # lsh modified
+
             post_transition_data = {
                 "actions": cpu_actions,
-                "reward": [(reward,)],
+                "reward": [reward_item],  # lhc
                 "terminated": [(terminated != env_info.get("episode_limit", False),)],
                 "battle_won": [(env_info.get("battle_won", False),)] # lsh 修改
             }
