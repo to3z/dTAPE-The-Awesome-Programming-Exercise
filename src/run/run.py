@@ -201,17 +201,20 @@ def run_sequential(args, logger):
             if args.accumulated_episodes and next_episode % args.accumulated_episodes != 0:
                 continue
 
-            episode_sample = buffer.sample(args.batch_size)
+            # [修改建议] 根据 batch_size_run 的大小循环多次训练
+            # 这样可以保证每收集 1 个回合的数据量，平均还是对应 1 次训练
+            for _ in range(args.batch_size_run): 
+                episode_sample = buffer.sample(args.batch_size)
 
-            # Truncate batch to only filled timesteps
-            max_ep_t = episode_sample.max_t_filled()
-            episode_sample = episode_sample[:, :max_ep_t]
+                # Truncate batch to only filled timesteps
+                max_ep_t = episode_sample.max_t_filled()
+                episode_sample = episode_sample[:, :max_ep_t]
 
-            if episode_sample.device != args.device:
-                episode_sample.to(args.device)
+                if episode_sample.device != args.device:
+                    episode_sample.to(args.device)
 
-            learner.train(episode_sample, runner.t_env, episode)
-            del episode_sample
+                learner.train(episode_sample, runner.t_env, episode)
+                del episode_sample
 
         # Execute test runs once in a while
         n_test_runs = max(1, args.test_nepisode // runner.batch_size)
