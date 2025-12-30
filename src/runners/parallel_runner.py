@@ -239,8 +239,8 @@ class ParallelRunner:
         return self.batch
 
     def _log(self, returns, stats, prefix):
-        self.logger.log_stat(prefix + "return_mean", np.mean(returns["reward"]), self.t_env)
-        self.logger.log_stat(prefix + "return_std", np.std(returns["reward"]), self.t_env)
+        self.logger.log_stat(prefix + "reward_mean", np.mean(returns["reward"]), self.t_env)
+        self.logger.log_stat(prefix + "reward_std", np.std(returns["reward"]), self.t_env)
         self.logger.log_stat(prefix + "delta_enemy_mean", np.mean(returns["delta_enemy"]), self.t_env)
         self.logger.log_stat(prefix + "delta_deaths_mean", np.mean(returns["delta_deaths"]), self.t_env)
         self.logger.log_stat(prefix + "delta_ally_mean", np.mean(returns["delta_ally"]), self.t_env)
