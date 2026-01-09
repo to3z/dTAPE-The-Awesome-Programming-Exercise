@@ -157,12 +157,11 @@ class ParallelRunner:
 
                     if self.args.reward_decompose:
                         if delta_lists is None:
-                            reward_dim = (self.args.n_agents + self.args.n_enemies) * 2 + 1
-                            reward_item = tuple([0] * reward_dim)
+                            reward_item = tuple([0] * self.args.reward_dim)
                         else:
                             delta_ally_list, delta_enemy_list, death_list = delta_lists
                             terminate_reward = 1 if data["info"].get("battle_won", False) else 0
-                            reward_item = (*delta_ally_list, *delta_enemy_list, *death_list, terminate_reward)
+                            reward_item = (reward, *delta_ally_list, *delta_enemy_list, *death_list, terminate_reward)
                     else:
                         reward_item = (reward,)
 
