@@ -6,6 +6,7 @@ from components.episode_buffer import EpisodeBatch
 from modules.mixers.vdn import VDNMixer
 from modules.mixers.qmix import QMixer
 from modules.mixers.qmix_central_no_hyper import QMixerCentralFF
+from modules.mixers.atten_qmix import AttentionalQMixer
 from utils.rl_utils import build_td_lambda_targets
 import torch as th
 import numpy as np
@@ -49,6 +50,8 @@ class MaxQAttenLearner:
                 self.mixer = VDNMixer()
             elif args.mixer == "qmix":
                 self.mixer = QMixer(args)
+            elif args.mixer == "atten_qmix":
+                self.mixer = AttentionalQMixer(args)
             else:
                 raise ValueError("Mixer {} not recognised.".format(args.mixer))
             self.mixer_params = list(self.mixer.parameters())
@@ -85,12 +88,7 @@ class MaxQAttenLearner:
         if self.args.reward_decompose:
             # reward_dim = delta_ally + delta_enemy + delta_deaths + terminate_reward
             self._init_reward_weights(args)
-
-            self.construct_reward = lambda reward: th.bmm(
-                reward,  # (bs, t, reward_dim)
-                self.reward_weights.unsqueeze(0).expand(reward.shape[0], -1, -1)  # (bs, reward_dim, 1)
-            )  # return: (bs, t, 1)
-            self.reward_weights_optimizer = Adam(params=[self.reward_weights], lr=1e-4)
+            self.reward_weights_optimizer = Adam(params=[self.reward_weights], lr=3e-5)
 
         print('Mixer Size: ')
         print(get_parameters_num(list(self.mixer.parameters()) + list(self.central_mixer.parameters())))
@@ -106,7 +104,7 @@ class MaxQAttenLearner:
 
     def train(self, batch: EpisodeBatch, t_env: int, episode_num: int):
         # Get the relevant quantities
-        rewards = batch["reward"][:, :-1]
+        raw_rewards = batch["reward"][:, :-1]
         actions = batch["actions"][:, :-1]
         terminated = batch["terminated"][:, :-1].float()
         mask = batch["filled"][:, :-1].float()
@@ -114,7 +112,9 @@ class MaxQAttenLearner:
         avail_actions = batch["avail_actions"]
         
         if self.args.reward_decompose:
-            rewards = self.construct_reward(rewards)  # (bs, t, 1)
+            rewards = self.construct_reward(raw_rewards)  # (bs, t, 1)
+        else:
+            rewards = raw_rewards
 
         if self.args.multi_reward:
             rewards[0] = rewards[0] * (1 - self.alpha) + (rewards[1] + rewards[2] - rewards[3]) * self.alpha
@@ -223,7 +223,7 @@ class MaxQAttenLearner:
         masked_td_error = td_error * mask
 
         # ActorLoss
-        q_i_mean_negi_mean = th.sum(mac_out * (self.alpha * actions_logprobs - critic_mac_out), dim=-1)  # (bs, t+1, n_agents)
+        q_i_mean_negi_mean = th.sum(mac_out * (self.alpha * actions_logprobs - critic_mac_out.detach()), dim=-1)  # (bs, t+1, n_agents)
         
         if self.args.mispred_rewards:
             q_i_mean_negi_mean -= mispred_rewards
@@ -360,17 +360,19 @@ class MaxQAttenLearner:
                 gamma_rewards = th.mm(rewards.squeeze(-1), gamma_array.unsqueeze(1))  # (bs, t) @ (t, 1) -> (bs, 1)
                 mean_reward_won = gamma_rewards[battle_won == 1].mean()
                 mean_reward_lost = gamma_rewards[battle_won == 0].mean()
-                mean_reward = gamma_rewards.mean().item()
+                # mean_reward = gamma_rewards.mean().item()
                 # 最大化 mean_reward_won - mean_reward_lost
                 reward_weight_loss = - (mean_reward_won - mean_reward_lost)
                 self.reward_weights_optimizer.zero_grad()
                 reward_weight_loss.backward()
+                th.nn.utils.clip_grad_norm_([self.reward_weights], 1.0)
                 self.reward_weights_optimizer.step()
-                mean_reward_updated = gamma_rewards.mean().item()
-                reward_scale_factor = mean_reward / (mean_reward_updated + 1e-8)
-                # 保持 reward scale 不变
-                with th.no_grad():
-                    self.reward_weights.mul_(reward_scale_factor)
+                # rewards_updated = self.construct_reward(raw_rewards)
+                # mean_reward_updated = th.mm(rewards_updated.squeeze(-1), gamma_array.unsqueeze(1)).mean().item()
+                # reward_scale_factor = mean_reward / (mean_reward_updated + 1e-8)
+                # # 保持 reward scale 不变
+                # with th.no_grad():
+                #     self.reward_weights.mul_(reward_scale_factor)
 
         if t_env < 2000000:
             self.alpha = th.clamp(self.alpha, max = 0.999)
@@ -449,7 +451,7 @@ class MaxQAttenLearner:
     
     def _init_reward_weights(self, args):
         self.reward_dim = (args.n_agents + args.n_enemies) * 2 + 1
-        self.default_weights = th.ones((self.reward_dim, 1), device=args.device, requires_grad=True)
+        self.default_weights = th.ones((self.reward_dim, 1), device=args.device)
         with th.no_grad():
             reward_negative_scale = args.env_args.get("reward_negative_scale", 1.0)
             reward_death_value = args.env_args.get("reward_death_value", 1.0)
@@ -461,6 +463,9 @@ class MaxQAttenLearner:
             self.default_weights[args.n_agents + args.n_enemies : args.n_agents + args.n_enemies + args.n_agents] *= -reward_negative_scale * reward_death_value  # ally deaths
             self.default_weights[args.n_agents + args.n_enemies + args.n_agents : -1] *= reward_death_value  # enemy deaths
             self.default_weights[-1] *= reward_win - reward_lose  # terminate reward
-            max_reward = sc2_tactics_utils.common_utils.calculate_max_reward(args.n_enemies, reward_death_value, reward_win)
-            self.default_weights /= max_reward / reward_scale_rate
-        self.reward_weights = th.nn.Parameter(self.default_weights.clone().detach())
+            self.default_weights /= args.max_reward / reward_scale_rate
+        self.reward_weights = th.nn.Parameter(self.default_weights.clone())
+
+    def construct_reward(self, raw_reward):
+        return raw_reward[:, :, 1:] @ self.reward_weights
+        # (bs, t, reward_dim) @ (reward_dim, 1) -> (bs, t, 1)

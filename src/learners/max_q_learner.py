@@ -5,6 +5,7 @@ from torch.autograd import Variable
 from components.episode_buffer import EpisodeBatch
 from modules.mixers.vdn import VDNMixer
 from modules.mixers.qmix import QMixer
+from modules.mixers.atten_qmix import AttentionalQMixer
 from modules.mixers.qmix_central_no_hyper import QMixerCentralFF
 from utils.rl_utils import build_td_lambda_targets
 import torch as th
@@ -44,6 +45,8 @@ class MAXQLearner:
                 self.mixer = VDNMixer()
             elif args.mixer == "qmix":
                 self.mixer = QMixer(args)
+            elif args.mixer == "atten_qmix":
+                self.mixer = AttentionalQMixer(args)
             else:
                 raise ValueError("Mixer {} not recognised.".format(args.mixer))
             self.mixer_params = list(self.mixer.parameters())
