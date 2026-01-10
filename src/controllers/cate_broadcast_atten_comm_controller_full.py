@@ -22,6 +22,7 @@ class CateBAttenCommFMAC:
 
 		self._build_agents(input_shape)
 		self.agent_output_type = args.agent_output_type
+		assert self.agent_output_type == "q", "only support q value output"
 
 		self.action_selector = action_REGISTRY[args.action_selector](args)
 
@@ -137,11 +138,12 @@ class CateBAttenCommFMAC:
 					agent_outs[reshaped_avail_actions == 0] = 0.0
 
 		# shape = (bs, self.n_agents, -1)
-		agent_outs = agent_outs.view(ep_batch.batch_size, self.n_agents, -1)
-		mu = mu.view(ep_batch.batch_size, self.n_agents, -1)
-		sigma = sigma.view(ep_batch.batch_size, self.n_agents, -1)
-		logits = logits.view(ep_batch.batch_size, self.n_agents, -1)
-		messages = messages.view(ep_batch.batch_size, self.n_agents, -1)
+		bs = ep_batch.batch_size
+		agent_outs = agent_outs.view(bs, self.n_agents, -1)
+		mu = mu.view(bs, self.n_agents, -1)
+		sigma = sigma.view(bs, self.n_agents, -1)
+		logits = logits.view(bs, self.n_agents, -1)
+		messages = messages.view(bs, self.n_agents, -1)
 		return agent_outs, (mu, sigma), logits, messages, atten_score, pred_actions
 
 
@@ -258,18 +260,21 @@ class CateBAttenCommFMAC:
 			atten_score: (bs, receiver, sender)
 			pred_actions: (bs, predicted, predictor, n_actions)
 		"""
-		# 把 inputs 编码成 latent 表示
-		latent = self.comm.encoder(inputs)  # (bs*n_agents, hidden)
+		# 单帧的特征提取
+		enc_latent = self.comm.encoder(inputs)  # (bs*n_agents, hidden)
+
+		# 序列特征提取
+		full_latent = th.cat([enc_latent, self.hidden_states.view(bs * self.n_agents, -1)], dim=-1)  # (bs*n_agents, 2 * rnn_hidden)
 
 		# 计算每个 agent 的 query 和 key
-		q, k = self.comm.w_q(latent), self.comm.w_k(latent)  # (bs*n_agents, att_dim)
+		q, k = self.comm.w_q(full_latent), self.comm.w_k(full_latent)  # (bs*n_agents, att_dim)
 
 		# reshape 成 (bs, receiver, sender, -1) 的形式，方便后续计算
 		q_expand = q.view(bs, -1, 1, self.args.atten_dim).repeat(1, 1, self.n_agents, 1)  # (bs, receiver, sender[repeated], att_dim)
-		latent_expand = latent.view(bs, 1, -1, self.args.rnn_hidden_dim).repeat(1, self.n_agents, 1, 1)  # (bs, receiver[repeated], sender, hidden)
+		latent_expand = full_latent.view(bs, 1, -1, self.args.rnn_hidden_dim).repeat(1, self.n_agents, 1, 1)  # (bs, receiver[repeated], sender, 2 * hidden)
 
 		# 将 latent 和 query 拼接，作为输入
-		comm_input = th.cat((latent_expand, q_expand), dim=-1).view(bs * self.n_agents * self.n_agents, -1)  # (bs * receiver * sender, hidden + att_dim)
+		comm_input = th.cat((latent_expand, q_expand), dim=-1).view(bs * self.n_agents * self.n_agents, -1)  # (bs * receiver * sender, 2 * hidden + att_dim)
 
 		# 计算 mu 和 sigma
 		mu = self.comm.mu_gen(comm_input).view(bs, self.n_agents, self.n_agents, -1)  # (bs, receiver, sender, comm_embed_dim)
@@ -284,13 +289,20 @@ class CateBAttenCommFMAC:
 		else:
 			pred_actions = None
 
-		# 计算 attention score (query 和 key 的 cosine similarity)
-		# q_norm = F.normalize(q, p=2, dim=-1)
-		# k_norm = F.normalize(k, p=2, dim=-1)
+		# 计算 attention score
+		n_head = self.args.n_attention_head
+		q = q.reshape(bs, self.n_agents, n_head, -1).permute(0, 2, 1, 3).reshape(bs * n_head, self.n_agents, -1)  # (bs*n_head, receiver, head_dim)
+		k = k.reshape(bs, self.n_agents, n_head, -1).permute(0, 2, 1, 3).reshape(bs * n_head, self.n_agents, -1)  # (bs*n_head, sender, head_dim)
 		atten_score = th.bmm(
-			q.view(bs, self.n_agents, -1),
-			k.view(bs, self.n_agents, -1).transpose(1, 2))
-		# atten_score: (bs, receiver, sender)
+			q.view(bs * n_head, self.n_agents, -1),
+			k.view(bs * n_head, self.n_agents, -1).transpose(1, 2)
+		) / th.sqrt(th.tensor(k.size(-1), dtype=th.float32))  # (bs*n_head, receiver, sender)
+
+		atten_score = atten_score.view(bs, n_head, self.n_agents, self.n_agents).mean(dim=1)  # (bs, receiver, sender)
+
+		# 使用 atten_score 对 message 进行加权：保留高关注度的信息，抑制低关注度的噪声
+		mask = th.sigmoid(atten_score).unsqueeze(-1) # (bs, receiver, sender, 1)
+		message = message * mask
 
 		return (mu, sigma), message, atten_score, pred_actions
 

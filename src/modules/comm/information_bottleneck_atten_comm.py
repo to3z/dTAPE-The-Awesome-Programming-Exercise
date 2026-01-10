@@ -17,11 +17,11 @@ class IBAttenComm(nn.Module):
             nn.ReLU(True)
         )
 
-        self.w_q = nn.Linear(args.rnn_hidden_dim, self.att_dim)
-        self.w_k = nn.Linear(args.rnn_hidden_dim, self.att_dim)
+        self.w_q = nn.Linear(2 * args.rnn_hidden_dim, self.att_dim)
+        self.w_k = nn.Linear(2 * args.rnn_hidden_dim, self.att_dim)
 
         self.mu_gen = nn.Sequential(
-            nn.Linear(args.rnn_hidden_dim + self.att_dim, args.rnn_hidden_dim),
+            nn.Linear(2 * args.rnn_hidden_dim + self.att_dim, args.rnn_hidden_dim),
             nn.ReLU(True),
             nn.Linear(args.rnn_hidden_dim, args.comm_embed_dim)
         )
@@ -35,7 +35,7 @@ class IBAttenComm(nn.Module):
         )
 
         self.action_predictor = nn.Sequential(
-            nn.Linear(args.rnn_hidden_dim + self.att_dim, args.rnn_hidden_dim),
+            nn.Linear(2 * args.rnn_hidden_dim + self.att_dim, args.rnn_hidden_dim),
             nn.ReLU(True),
             nn.Linear(args.rnn_hidden_dim, args.n_actions),
             nn.LogSoftmax(dim=-1)
