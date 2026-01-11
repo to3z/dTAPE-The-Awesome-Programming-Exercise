@@ -8,9 +8,9 @@
 
 ## Introduction
 
-This repository contains the implementation and experimental results for the Reinforcement Learning course project at Peking University. Our work focuses on the **Deterministic TAPE (dTAPE)** algorithm from the AAAI 2024 paper *"TAPE: Leveraging Agent Topology for Cooperative Multi-Agent Policy Gradient"*.
+This repository contains the implementation for the Reinforcement Learning course project at Peking University. Our work focuses on the **Deterministic TAPE (dTAPE)** algorithm from the AAAI 2024 paper *"TAPE: Leveraging Agent Topology for Cooperative Multi-Agent Policy Gradient"*.
 
-Specifically, we address the credit assignment failure in highly heterogeneous scenarios (e.g., `wzsy`, `swct`). We propose an **Attentional Mixer** to replace the original aggregation mechanism. Our experimental results demonstrate that this improvement significantly enhances the "Diversionary Tactic" (e.g., in `wzsy`) and achieves stable win rates in complex tactical maps.
+Specifically, we address the credit assignment failure in cooperative multi-agent RL. We propose an Attentional Mixer to replace the original aggregation mechanism. We also construct a topology based on attention scores among agents. Our experimental results demonstrate that this improvement significantly achieves stable win rates in complex tactical maps.
 
 ## Codebase & Acknowledgements
 
