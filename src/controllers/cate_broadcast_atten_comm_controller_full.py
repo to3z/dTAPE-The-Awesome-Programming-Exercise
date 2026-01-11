@@ -271,7 +271,7 @@ class CateBAttenCommFMAC:
 
 		# reshape 成 (bs, receiver, sender, -1) 的形式，方便后续计算
 		q_expand = q.view(bs, -1, 1, self.args.atten_dim).repeat(1, 1, self.n_agents, 1)  # (bs, receiver, sender[repeated], att_dim)
-		latent_expand = full_latent.view(bs, 1, -1, self.args.rnn_hidden_dim).repeat(1, self.n_agents, 1, 1)  # (bs, receiver[repeated], sender, 2 * hidden)
+		latent_expand = full_latent.view(bs, 1, -1, 2 * self.args.rnn_hidden_dim).repeat(1, self.n_agents, 1, 1)  # (bs, receiver[repeated], sender, 2 * hidden)
 
 		# 将 latent 和 query 拼接，作为输入
 		comm_input = th.cat((latent_expand, q_expand), dim=-1).view(bs * self.n_agents * self.n_agents, -1)  # (bs * receiver * sender, 2 * hidden + att_dim)
