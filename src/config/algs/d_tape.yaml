@@ -5,8 +5,11 @@ epsilon_finish: 0.05
 epsilon_anneal_time: 100000 #100000
 # 50000 -> 1000000??
 
-runner: "episode"
-batch_size_run: 1
+run_async: False
+steps_per_train: 100
+flow_control_thres: 10000
+runner: "parallel"
+batch_size_run: 8
 buffer_size: 5000
 
 batch_size: 128
@@ -83,4 +86,6 @@ alpha_init: -0.07
 #critic_mac: "basic_mac"
 
 p: 0.5
-name: "ow_qmix_env=4_adam_td_lambda"
+name: "baseline"
+
+gamma: 0.999
