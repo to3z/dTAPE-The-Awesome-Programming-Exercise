@@ -8,18 +8,15 @@ class LSHRNNAgent(nn.Module):
         self.args = args
 
         # === 改进 1: 更深的特征提取器 (MLP) ===
-        # 原来只有一层 fc1，现在可以加深
-        # 如果显存允许，可以增加 hidden sizes
+        # 原来只有一层 fc1，可以加深
         self.fc1 = nn.Linear(input_shape, args.rnn_hidden_dim)
         self.fc2 = nn.Linear(args.rnn_hidden_dim, args.rnn_hidden_dim) # 新增一层
         
         # === 改进 2: Layer Normalization ===
-        # 有助于稳定训练，特别是对于深层网络和 RNN
         self.layer_norm = nn.LayerNorm(args.rnn_hidden_dim)
 
         self.rnn = nn.GRUCell(args.rnn_hidden_dim, args.rnn_hidden_dim)
         
-        # 输出层
         self.fc3 = nn.Linear(args.rnn_hidden_dim, args.n_actions)
 
         # === 改进 3: 参数初始化 ===
@@ -44,11 +41,10 @@ class LSHRNNAgent(nn.Module):
     def forward(self, inputs, hidden_state=None):
         b, a, e = inputs.size()
         
-        # 特征提取
         x = F.relu(self.fc1(inputs.view(-1, e)), inplace=True)
-        x = F.relu(self.fc2(x), inplace=True) # 第二层特征提取
+        x = F.relu(self.fc2(x), inplace=True)
         
-        x = self.layer_norm(x) # 归一化
+        x = self.layer_norm(x)
 
         if hidden_state is not None:
             hidden_state = hidden_state.reshape(-1, self.args.rnn_hidden_dim)
